@@ -1,6 +1,6 @@
 import type { AxiosProgressEvent, GenericAbortSignal } from 'axios'
-import { get, post } from '@/utils/request'
-import type { AuditConfig, ConfigState, MailConfig, SiteConfig } from '@/components/common/Setting/model'
+
+import { post } from '@/utils/request'
 import { useAuthStore, useSettingStore } from '@/store'
 
 export function fetchChatAPI<T = any>(
@@ -20,12 +20,9 @@ export function fetchChatConfig<T = any>() {
     url: '/config',
   })
 }
-
+const email: string = localStorage.getItem('email')?.trim() ?? '123'
 export function fetchChatAPIProcess<T = any>(
   params: {
-    roomId: number
-    uuid: number
-    regenerate?: boolean
     prompt: string
     options?: { conversationId?: string; parentMessageId?: string }
     signal?: GenericAbortSignal
@@ -35,11 +32,9 @@ export function fetchChatAPIProcess<T = any>(
   const authStore = useAuthStore()
 
   let data: Record<string, any> = {
-    roomId: params.roomId,
-    uuid: params.uuid,
-    regenerate: params.regenerate || false,
     prompt: params.prompt,
     options: params.options,
+    email,
   }
 
   if (authStore.isChatGPTAPI) {
@@ -62,6 +57,7 @@ export function fetchChatAPIProcess<T = any>(
 export function fetchSession<T>() {
   return post<T>({
     url: '/session',
+
   })
 }
 
@@ -71,148 +67,63 @@ export function fetchVerify<T>(token: string) {
     data: { token },
   })
 }
+interface LoginData {
+  email: string
+  password: string
 
-export function fetchVerifyAdmin<T>(token: string) {
+}
+
+interface RegisterData {
+  verifyCode: string
+  password: string
+  email: string
+
+}
+
+export function fetchlogo<T = string >(data: LoginData) {
   return post<T>({
-    url: '/verifyadmin',
-    data: { token },
+    url: '/login',
+
+    data,
   })
 }
-
-export function fetchLogin<T = any>(username: string, password: string) {
+export function fetchregister<T = string>(data: RegisterData) {
   return post<T>({
-    url: '/user-login',
-    data: { username, password },
+    url: '/register',
+
+    data,
   })
 }
+interface SendVerifyEmailData {
+  email: string
 
-export function fetchSendResetMail<T = any>(username: string) {
+}
+export function sendVerifyEmail<T>(data: SendVerifyEmailData) {
   return post<T>({
-    url: '/user-send-reset-mail',
-    data: { username },
+    url: '/send-verify-code',
+    data,
   })
 }
+interface aredeemData {
+  couponCode: string
 
-export function fetchResetPassword<T = any>(username: string, password: string, sign: string) {
+}
+
+export function aredeem<T = any>(data: aredeemData) {
   return post<T>({
-    url: '/user-reset-password',
-    data: { username, password, sign },
+    url: '/redeem',
+
+    data,
   })
 }
+interface userkeyy {
+  userkeye: string
 
-export function fetchRegister<T = any>(username: string, password: string) {
+}
+export function userkey<T = any>(data: userkeyy) {
   return post<T>({
-    url: '/user-register',
-    data: { username, password },
-  })
-}
+    url: '/userkey',
 
-export function fetchUpdateUserInfo<T = any>(name: string, avatar: string, description: string) {
-  return post<T>({
-    url: '/user-info',
-    data: { name, avatar, description },
-  })
-}
-
-export function fetchGetChatRooms<T = any>() {
-  return get<T>({
-    url: '/chatrooms',
-  })
-}
-
-export function fetchCreateChatRoom<T = any>(title: string, roomId: number) {
-  return post<T>({
-    url: '/room-create',
-    data: { title, roomId },
-  })
-}
-
-export function fetchRenameChatRoom<T = any>(title: string, roomId: number) {
-  return post<T>({
-    url: '/room-rename',
-    data: { title, roomId },
-  })
-}
-
-export function fetchUpdateChatRoomPrompt<T = any>(prompt: string, roomId: number) {
-  return post<T>({
-    url: '/room-prompt',
-    data: { prompt, roomId },
-  })
-}
-
-export function fetchDeleteChatRoom<T = any>(roomId: number) {
-  return post<T>({
-    url: '/room-delete',
-    data: { roomId },
-  })
-}
-
-export function fetchGetChatHistory<T = any>(roomId: number, lastId?: number) {
-  return get<T>({
-    url: `/chat-hisroty?roomId=${roomId}&lastId=${lastId}`,
-  })
-}
-
-export function fetchClearAllChat<T = any>() {
-  return post<T>({
-    url: '/chat-clear-all',
-    data: { },
-  })
-}
-
-export function fetchClearChat<T = any>(roomId: number) {
-  return post<T>({
-    url: '/chat-clear',
-    data: { roomId },
-  })
-}
-
-export function fetchDeleteChat<T = any>(roomId: number, uuid: number, inversion?: boolean) {
-  return post<T>({
-    url: '/chat-delete',
-    data: { roomId, uuid, inversion },
-  })
-}
-
-export function fetchUpdateMail<T = any>(mail: MailConfig) {
-  return post<T>({
-    url: '/setting-mail',
-    data: mail,
-  })
-}
-
-export function fetchTestMail<T = any>(mail: MailConfig) {
-  return post<T>({
-    url: '/mail-test',
-    data: mail,
-  })
-}
-
-export function fetchUpdateAudit<T = any>(audit: AuditConfig) {
-  return post<T>({
-    url: '/setting-audit',
-    data: audit,
-  })
-}
-
-export function fetchTestAudit<T = any>(text: string, audit: AuditConfig) {
-  return post<T>({
-    url: '/audit-test',
-    data: { audit, text },
-  })
-}
-
-export function fetchUpdateSite<T = any>(config: SiteConfig) {
-  return post<T>({
-    url: '/setting-site',
-    data: config,
-  })
-}
-
-export function fetchUpdateBaseSetting<T = any>(config: ConfigState) {
-  return post<T>({
-    url: '/setting-base',
-    data: config,
+    data,
   })
 }

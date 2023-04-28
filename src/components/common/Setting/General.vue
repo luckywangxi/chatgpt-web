@@ -1,15 +1,14 @@
 <script lang="ts" setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { NButton, NInput, NPopconfirm, NSelect, useMessage } from 'naive-ui'
 import type { Language, Theme } from '@/store/modules/app/helper'
 import { SvgIcon } from '@/components/common'
-import { useAppStore, useUserStore } from '@/store'
-import type { UserInfo } from '@/store/modules/user/helper'
+import { useAppStore, useAuthStore, useUserStore } from '@/store'
+import type { UserInfoo } from '@/store/modules/user/helper'
 import { getCurrentDate } from '@/utils/functions'
 import { useBasicLayout } from '@/hooks/useBasicLayout'
 import { t } from '@/locales'
-import { fetchClearAllChat } from '@/api'
-
+import { fetchChatConfig, userkey } from '@/api'
 const appStore = useAppStore()
 const userStore = useUserStore()
 
@@ -21,9 +20,10 @@ const theme = computed(() => appStore.theme)
 
 const userInfo = computed(() => userStore.userInfo)
 
-const avatar = ref(userInfo.value.avatar ?? '')
+const userkeye = ref<string>(localStorage.getItem('userkeye')?.trim() ?? '')
+console.log(userkeye)
 
-const name = ref(userInfo.value.name ?? '')
+const username = ref(localStorage.getItem('email')?.trim() ?? '123')
 
 const description = ref(userInfo.value.description ?? '')
 
@@ -53,17 +53,41 @@ const themeOptions: { label: string; key: Theme; icon: string }[] = [
     icon: 'ri:moon-foggy-line',
   },
 ]
-
+const authStore = useAuthStore()
 const languageOptions: { label: string; key: Language; value: Language }[] = [
   { label: '简体中文', key: 'zh-CN', value: 'zh-CN' },
   { label: '繁體中文', key: 'zh-TW', value: 'zh-TW' },
   { label: 'English', key: 'en-US', value: 'en-US' },
-  { label: '한국어', key: 'ko-KR', value: 'ko-KR' },
 ]
 
-async function updateUserInfo(options: Partial<UserInfo>) {
-  await userStore.updateUserInfo(true, options)
+async function updateUserInfo(options: UserInfoo) {
+  console.log(options.userkeye)
+  if (options.userkeye === '1' || options.userkeye === '' || options.userkeye === undefined) {
+    options = { userkeye: '1' }
+    const response = await userkey<UserInfoo>(options)
+    const key = response.data
+
+    authStore.setkey(key)
+    // userStore.updateUserInfo(options)
+
+    ms.success(t('common.success'))
+  }
+  else {
+    const response = await userkey<UserInfoo>(options)
+    const key = response.data
+
+    authStore.setkey(key)
+    // userStore.updateUserInfo(options)
+
+    ms.success(t('common.success'))
+  }
+}
+
+function handleReset() {
+  userStore.opp()
   ms.success(t('common.success'))
+  authStore.setToken('')
+  window.location.reload()
 }
 
 function exportData(): void {
@@ -104,8 +128,7 @@ function importData(event: Event): void {
   reader.readAsText(file)
 }
 
-async function clearData(): Promise<void> {
-  await fetchClearAllChat()
+function clearData(): void {
   localStorage.removeItem('chatStorage')
   location.reload()
 }
@@ -115,27 +138,64 @@ function handleImportButtonClick(): void {
   if (fileInput)
     fileInput.click()
 }
+const loading = ref(false)
+const config = ref<ConfigState>()
+async function fetchConfig() {
+  try {
+    loading.value = true
+    const { data } = await fetchChatConfig<ConfigState>()
+    config.value = data
+  }
+  finally {
+    loading.value = false
+  }
+}
+interface ConfigState {
+  timeoutMs?: number
+  reverseProxy?: string
+  apiModel?: string
+  socksProxy?: string
+  httpsProxy?: string
+  usage?: string
+}
+onMounted(() => {
+  fetchConfig()
+})
 </script>
 
 <template>
   <div class="p-4 space-y-5 min-h-[200px]">
     <div class="space-y-6">
       <div class="flex items-center space-x-4">
+        <span class="flex-shrink-0 w-[100px]">{{ $t('setting.openaikey') }}</span>
+        <div class="flex-1">
+          <NInput v-model:value="userkeye" placeholder="" :disabled="false" :readonly="false" />
+        </div>
+        <NButton size="tiny" text type="primary" @click="updateUserInfo({ userkeye })">
+          {{ $t('common.save') }}
+        </NButton>
+      </div>
+      <div class="flex items-center space-x-4">
+        <span class="flex-shrink-0 w-[100px]">{{ $t("setting.monthlyUsage") }}</span>
+        <div class="w-[200px]">
+          {{ config?.usage ?? '-' }}
+        </div>
+      </div>
+
+      <div class="flex-1">
+        <span>{{ $t('setting.keyshuoming') }}</span>
+      </div>
+
+      <div class="flex items-center space-x-4">
         <span class="flex-shrink-0 w-[100px]">{{ $t('setting.name') }}</span>
         <div class="w-[200px]">
-          <NInput v-model:value="name" placeholder="" />
+          {{ username }}
         </div>
       </div>
       <div class="flex items-center space-x-4">
         <span class="flex-shrink-0 w-[100px]">{{ $t('setting.description') }}</span>
         <div class="flex-1">
-          <NInput v-model:value="description" placeholder="" />
-        </div>
-      </div>
-      <div class="flex items-center space-x-4">
-        <span class="flex-shrink-0 w-[100px]">{{ $t('setting.avatarLink') }}</span>
-        <div class="flex-1">
-          <NInput v-model:value="avatar" placeholder="" />
+          {{ description }}
         </div>
       </div>
       <div
@@ -201,9 +261,9 @@ function handleImportButtonClick(): void {
         </div>
       </div>
       <div class="flex items-center space-x-4">
-        <span class="flex-shrink-0 w-[100px]">{{ $t('setting.saveUserInfo') }}</span>
-        <NButton type="primary" @click="updateUserInfo({ avatar, name, description })">
-          {{ $t('common.save') }}
+        <span class="flex-shrink-0 w-[100px]">{{ $t('setting.resetUserInfo') }}</span>
+        <NButton size="small" @click="handleReset">
+          {{ $t('common.reset') }}
         </NButton>
       </div>
     </div>

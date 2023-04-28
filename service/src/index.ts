@@ -1,48 +1,18 @@
+import fs from 'fs'
+import path from 'path'
 import express from 'express'
 import jwt from 'jsonwebtoken'
-import * as dotenv from 'dotenv'
+import nodemailer from 'nodemailer'
+import type { OkPacket, RowDataPacket } from 'mysql2'
 import type { RequestProps } from './types'
-import type { ChatContext, ChatMessage } from './chatgpt'
-import { chatConfig, chatReplyProcess, containsSensitiveWords, initApi, initAuditService } from './chatgpt'
-import { auth } from './middleware/auth'
-import { clearConfigCache, getCacheConfig, getOriginConfig } from './storage/config'
-import type { AuditConfig, ChatInfo, ChatOptions, Config, MailConfig, SiteConfig, UsageResponse, UserInfo } from './storage/model'
-import { Status } from './storage/model'
-import {
-  clearChat,
-  createChatRoom,
-  createUser,
-  deleteAllChatRooms,
-  deleteChat,
-  deleteChatRoom,
-  existsChatRoom,
-  getChat,
-  getChatRoom,
-  getChatRooms,
-  getChats,
-  getUser,
-  getUserById,
-  insertChat,
-  insertChatUsage,
-  renameChatRoom,
-  updateChat,
-  updateConfig,
-  updateRoomPrompt,
-  updateUserInfo,
-  updateUserPassword,
-  verifyUser,
-} from './storage/mongo'
+import type { ChatMessage } from './chatgpt'
+import { chatConfig, chatReplyProcess, currentModel, setApiKey } from './chatgpt'
+import { auth, pool } from './middleware/auth'
 import { limiter } from './middleware/limiter'
-import { isEmail, isNotEmptyString } from './utils/is'
-import { sendNoticeMail, sendResetPasswordMail, sendTestMail, sendVerifyMail, sendVerifyMailAdmin } from './utils/mail'
-import { checkUserResetPassword, checkUserVerify, checkUserVerifyAdmin, getUserResetPasswordUrl, getUserVerifyUrl, getUserVerifyUrlAdmin, md5 } from './utils/security'
-import { rootAuth } from './middleware/rootAuth'
-
-dotenv.config()
+import { isNotEmptyString } from './utils/is'
 
 const app = express()
 const router = express.Router()
-
 app.use(express.static('public'))
 app.use(express.json())
 
@@ -53,407 +23,127 @@ app.all('*', (_, res, next) => {
   next()
 })
 
-router.get('/chatrooms', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    const rooms = await getChatRooms(userId)
-    const result = []
-    rooms.forEach((r) => {
-      result.push({
-        uuid: r.roomId,
-        title: r.title,
-        isEdit: false,
-        prompt: r.prompt,
-      })
-    })
-    res.send({ status: 'Success', message: null, data: result })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Load error', data: [] })
-  }
-})
-
-router.post('/room-create', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    const { title, roomId } = req.body as { title: string; roomId: number }
-    const room = await createChatRoom(userId, title, roomId)
-    res.send({ status: 'Success', message: null, data: room })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Create error', data: null })
-  }
-})
-
-router.post('/room-rename', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    const { title, roomId } = req.body as { title: string; roomId: number }
-    const room = await renameChatRoom(userId, title, roomId)
-    res.send({ status: 'Success', message: null, data: room })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Rename error', data: null })
-  }
-})
-
-router.post('/room-prompt', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    const { prompt, roomId } = req.body as { prompt: string; roomId: number }
-    const success = await updateRoomPrompt(userId, roomId, prompt)
-    if (success)
-      res.send({ status: 'Success', message: 'Saved successfully', data: null })
-    else
-      res.send({ status: 'Fail', message: 'Saved Failed', data: null })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Rename error', data: null })
-  }
-})
-
-router.post('/room-delete', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    const { roomId } = req.body as { roomId: number }
-    if (!roomId || !await existsChatRoom(userId, roomId)) {
-      res.send({ status: 'Fail', message: 'Unknow room', data: null })
-      return
-    }
-    await deleteChatRoom(userId, roomId)
-    res.send({ status: 'Success', message: null })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Delete error', data: null })
-  }
-})
-
-router.get('/chat-hisroty', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    const roomId = +req.query.roomId
-    const lastId = req.query.lastId as string
-    if (!roomId || !await existsChatRoom(userId, roomId)) {
-      res.send({ status: 'Success', message: null, data: [] })
-      // res.send({ status: 'Fail', message: 'Unknow room', data: null })
-      return
-    }
-    const chats = await getChats(roomId, !isNotEmptyString(lastId) ? null : parseInt(lastId))
-
-    const result = []
-    chats.forEach((c) => {
-      if (c.status !== Status.InversionDeleted) {
-        result.push({
-          uuid: c.uuid,
-          dateTime: new Date(c.dateTime).toLocaleString(),
-          text: c.prompt,
-          inversion: true,
-          error: false,
-          conversationOptions: null,
-          requestOptions: {
-            prompt: c.prompt,
-            options: null,
-          },
-        })
-      }
-      if (c.status !== Status.ResponseDeleted) {
-        const usage = c.options.completion_tokens
-          ? {
-              completion_tokens: c.options.completion_tokens || null,
-              prompt_tokens: c.options.prompt_tokens || null,
-              total_tokens: c.options.total_tokens || null,
-              estimated: c.options.estimated || null,
-            }
-          : undefined
-        result.push({
-          uuid: c.uuid,
-          dateTime: new Date(c.dateTime).toLocaleString(),
-          text: c.response,
-          inversion: false,
-          error: false,
-          loading: false,
-          conversationOptions: {
-            parentMessageId: c.options.messageId,
-            conversationId: c.options.conversationId,
-          },
-          requestOptions: {
-            prompt: c.prompt,
-            parentMessageId: c.options.parentMessageId,
-            options: {
-              parentMessageId: c.options.messageId,
-              conversationId: c.options.conversationId,
-            },
-          },
-          usage,
-        })
-      }
-    })
-
-    res.send({ status: 'Success', message: null, data: result })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Load error', data: null })
-  }
-})
-
-router.post('/chat-delete', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    const { roomId, uuid, inversion } = req.body as { roomId: number; uuid: number; inversion: boolean }
-    if (!roomId || !await existsChatRoom(userId, roomId)) {
-      res.send({ status: 'Fail', message: 'Unknow room', data: null })
-      return
-    }
-    await deleteChat(roomId, uuid, inversion)
-    res.send({ status: 'Success', message: null, data: null })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Delete error', data: null })
-  }
-})
-
-router.post('/chat-clear-all', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    await deleteAllChatRooms(userId)
-    res.send({ status: 'Success', message: null, data: null })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Delete error', data: null })
-  }
-})
-
-router.post('/chat-clear', auth, async (req, res) => {
-  try {
-    const userId = req.headers.userId as string
-    const { roomId } = req.body as { roomId: number }
-    if (!roomId || !await existsChatRoom(userId, roomId)) {
-      res.send({ status: 'Fail', message: 'Unknow room', data: null })
-      return
-    }
-    await clearChat(roomId)
-    res.send({ status: 'Success', message: null, data: null })
-  }
-  catch (error) {
-    console.error(error)
-    res.send({ status: 'Fail', message: 'Delete error', data: null })
-  }
-})
-
-router.post('/chat', auth, async (req, res) => {
-  try {
-    const { roomId, uuid, regenerate, prompt, options = {} } = req.body as
-      { roomId: number; uuid: number; regenerate: boolean; prompt: string; options?: ChatContext }
-    const message = regenerate
-      ? await getChat(roomId, uuid)
-      : await insertChat(uuid, prompt, roomId, options as ChatOptions)
-    const response = await chatReply(prompt, options)
-    if (response.status === 'Success') {
-      if (regenerate && message.options.messageId) {
-        const previousResponse = message.previousResponse || []
-        previousResponse.push({ response: message.response, options: message.options })
-        await updateChat(message._id as unknown as string,
-          response.data.text,
-          response.data.id,
-          response.data.detail?.usage as UsageResponse,
-          previousResponse)
-      }
-      else {
-        await updateChat(message._id as unknown as string,
-          response.data.text,
-          response.data.id,
-          response.data.detail?.usage as UsageResponse)
-      }
-
-      if (response.data.usage) {
-        await insertChatUsage(req.headers.userId as string,
-          roomId,
-          message._id,
-          response.data.id,
-          response.data.detail?.usage as UsageResponse)
-      }
-    }
-    res.send(response)
-  }
-  catch (error) {
-    res.send(error)
-  }
-})
-
 router.post('/chat-process', [auth, limiter], async (req, res) => {
   res.setHeader('Content-type', 'application/octet-stream')
+  const filePath = path.join(__dirname, './bad-words.json')
 
-  let { roomId, uuid, regenerate, prompt, options = {}, systemMessage, temperature, top_p } = req.body as RequestProps
-  const userId = req.headers.userId as string
-  const room = await getChatRoom(userId, roomId)
-  if (room != null && isNotEmptyString(room.prompt))
-    systemMessage = room.prompt
+  const buffer = fs.readFileSync(filePath)
+  const jsonString = buffer.toString()
+  const badWords = JSON.parse(jsonString)
 
-  let lastResponse
-  let result
-  let message: ChatInfo
+  const checkForBadWords = (message) => {
+  // 遍历关键词数组，检测消息中是否包含这些关键词
+    for (const badWord of badWords) {
+      if (new RegExp(badWord, 'g').test(message))
+        return '拒绝回复此消息' // '拒绝回复此消息' // 如果消息中包含关键词，直接返回 "拒绝回复此消息"
+    }
+    return message
+  }
+
   try {
-    const config = await getCacheConfig()
-    if (config.auditConfig.enabled || config.auditConfig.customizeEnabled) {
-      const userId = req.headers.userId.toString()
-      const user = await getUserById(userId)
-      if (user.email.toLowerCase() !== process.env.ROOT_USER && await containsSensitiveWords(config.auditConfig, prompt)) {
-        res.send({ status: 'Fail', message: '含有敏感词 | Contains sensitive words', data: null })
-        return
-      }
+    const { prompt, options = {}, systemMessage, temperature, top_p, email } = req.body as RequestProps
+
+    // 查询用户信息
+    const [rows] = await pool.execute(
+      'SELECT id, usage_count, usage_limit,apikey FROM users WHERE email = ?',
+      [email],
+    )
+    const user = rows[0]
+    const usageCount = user.usage_count
+    const usageLimit = user.usage_limit || 10
+    const userapikey = user.apikey
+
+    // 判断用户apikey是否等于1，如果等于1就增加使用次数，否则不增加
+    if (userapikey === '1' || userapikey === '' || userapikey === undefined) {
+      const zuserapikey = process.env.OPENAI_API_KEY
+      await setApiKey(zuserapikey)
+      if (usageCount >= usageLimit)
+        res.send({ status: 'Fail', message: '次数用完了及时充值' })
+      else
+        await pool.query('UPDATE users SET usage_count = usage_count + 1 WHERE email = ?', [email])
+    }
+    else {
+      await setApiKey(userapikey)
     }
 
-    message = regenerate
-      ? await getChat(roomId, uuid)
-      : await insertChat(uuid, prompt, roomId, options as ChatOptions)
+    // 将增加的使用次数传递给下一个中间件或者路由处理程序
+
+    const DEFAULT_USAGE_LIMIT = process.env.USAGE_LIMIT
+    const remainingUsage = Math.min((user.usage_limit || DEFAULT_USAGE_LIMIT))
+
     let firstChunk = true
-    result = await chatReplyProcess({
+
+    await chatReplyProcess({
       message: prompt,
       lastContext: options,
       process: (chat: ChatMessage) => {
-        lastResponse = chat
-        const chuck = {
-          id: chat.id,
-          conversationId: chat.conversationId,
-          text: chat.text,
-          detail: {
-            choices: [
-              {
-                finish_reason: undefined,
-              },
-            ],
-          },
-        }
-        if (chat.detail && chat.detail.choices.length > 0)
-          chuck.detail.choices[0].finish_reason = chat.detail.choices[0].finish_reason
+        // 检测每一条聊天消息是否包含关键词
+        chat.text = checkForBadWords(chat.text)
 
-        res.write(firstChunk ? JSON.stringify(chuck) : `\n${JSON.stringify(chuck)}`)
-        firstChunk = false
+        // 如果检测到关键词，直接返回一个包含 "拒绝回复此消息" 的回复消息
+        if (chat.text === '拒绝回复此消息') {
+          // res.write(JSON.stringify({ message: '拒绝回复此消息' }))
+          if (firstChunk) {
+            // 创建包含用户信息的新对象
+            const responseObj = {
+              role: chat.role,
+              parentMessageId: chat.parentMessageId,
+              id: chat.id,
+              text: '拒绝回复此消息',
+              usage_count: user.usage_count,
+              usage_limit: remainingUsage,
+            }
+            res.write(JSON.stringify(responseObj))
+            firstChunk = true
+          }
+        }
+
+        // 添加用户信息到响应体中
+        if (firstChunk) {
+          // 创建包含用户信息的新对象
+          const responseObj = {
+            ...chat,
+            usage_count: user.usage_count,
+            usage_limit: remainingUsage,
+          }
+          res.write(JSON.stringify(responseObj))
+          firstChunk = false
+        }
+        else {
+          res.write(`\n${JSON.stringify(chat)}`)
+        }
       },
       systemMessage,
       temperature,
       top_p,
+
     })
-    // return the whole response including usage
-    res.write(`\n${JSON.stringify(result.data)}`)
   }
   catch (error) {
     res.write(JSON.stringify(error))
   }
   finally {
     res.end()
-    try {
-      if (result == null || result === undefined || result.status !== 'Success') {
-        if (result && result.status !== 'Success')
-          lastResponse = { text: result.message }
-        result = { data: lastResponse }
-      }
-
-      if (result.data === undefined)
-        // eslint-disable-next-line no-unsafe-finally
-        return
-
-      if (regenerate && message.options.messageId) {
-        const previousResponse = message.previousResponse || []
-        previousResponse.push({ response: message.response, options: message.options })
-        await updateChat(message._id as unknown as string,
-          result.data.text,
-          result.data.id,
-          result.data.detail?.usage as UsageResponse,
-          previousResponse)
-      }
-      else {
-        await updateChat(message._id as unknown as string,
-          result.data.text,
-          result.data.id,
-          result.data.detail?.usage as UsageResponse)
-      }
-
-      if (result.data.detail?.usage) {
-        await insertChatUsage(req.headers.userId as string,
-          roomId,
-          message._id,
-          result.data.id,
-          result.data.detail?.usage as UsageResponse)
-      }
-    }
-    catch (error) {
-      global.console.log(error)
-    }
-  }
-})
-
-router.post('/user-register', async (req, res) => {
-  try {
-    const { username, password } = req.body as { username: string; password: string }
-    const config = await getCacheConfig()
-    if (!config.siteConfig.registerEnabled) {
-      res.send({ status: 'Fail', message: '注册账号功能未启用 | Register account is disabled!', data: null })
-      return
-    }
-    if (!isEmail(username)) {
-      res.send({ status: 'Fail', message: '请输入正确的邮箱 | Please enter a valid email address.', data: null })
-      return
-    }
-    if (isNotEmptyString(config.siteConfig.registerMails)) {
-      let allowSuffix = false
-      const emailSuffixs = config.siteConfig.registerMails.split(',')
-      for (let index = 0; index < emailSuffixs.length; index++) {
-        const element = emailSuffixs[index]
-        allowSuffix = username.toLowerCase().endsWith(element)
-        if (allowSuffix)
-          break
-      }
-      if (!allowSuffix) {
-        res.send({ status: 'Fail', message: '该邮箱后缀不支持 | The email service provider is not allowed', data: null })
-        return
-      }
-    }
-
-    const user = await getUser(username)
-    if (user != null) {
-      if (user.status === Status.PreVerify) {
-        await sendVerifyMail(username, await getUserVerifyUrl(username))
-        throw new Error('请去邮箱中验证 | Please verify in the mailbox')
-      }
-      if (user.status === Status.AdminVerify)
-        throw new Error('请等待管理员开通 | Please wait for the admin to activate')
-      res.send({ status: 'Fail', message: '账号已存在 | The email exists', data: null })
-      return
-    }
-    const newPassword = md5(password)
-    await createUser(username, newPassword)
-
-    if (username.toLowerCase() === process.env.ROOT_USER) {
-      res.send({ status: 'Success', message: '注册成功 | Register success', data: null })
-    }
-    else {
-      await sendVerifyMail(username, await getUserVerifyUrl(username))
-      res.send({ status: 'Success', message: '注册成功, 去邮箱中验证吧 | Registration is successful, you need to go to email verification', data: null })
-    }
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
   }
 })
 
 router.post('/config', auth, async (req, res) => {
   try {
-    const userId = req.headers.userId.toString()
+    const authHeader = req.headers.authorization
+    if (!authHeader)
+      throw new Error('Please authenticate.')
 
-    const user = await getUserById(userId)
-    if (user == null || user.status !== Status.Normal || user.email.toLowerCase() !== process.env.ROOT_USER)
-      throw new Error('无权限 | No permission.')
+    const token = authHeader.split(' ')[1]
+    if (!token)
+      throw new Error('Invalid token')
 
-    const response = await chatConfig()
+    const decoded = await jwt.verify(token, process.env.AUTH_SECRET_KEY)
+    const userId = decoded.userId
+
+    // 检查用户使用次数是否超限
+    const [key] = await pool.query('SELECT apikey FROM users WHERE id = ?', [userId])
+
+    const response = await chatConfig(key[0].apikey)
     res.send(response)
   }
   catch (error) {
@@ -463,97 +153,9 @@ router.post('/config', auth, async (req, res) => {
 
 router.post('/session', async (req, res) => {
   try {
-    const config = await getCacheConfig()
-    const hasAuth = config.siteConfig.loginEnabled
-    const allowRegister = (await getCacheConfig()).siteConfig.registerEnabled
-    if (config.apiModel !== 'ChatGPTAPI' && config.apiModel !== 'ChatGPTUnofficialProxyAPI')
-      config.apiModel = 'ChatGPTAPI'
-
-    res.send({ status: 'Success', message: '', data: { auth: hasAuth, allowRegister, model: config.apiModel, title: config.siteConfig.siteTitle } })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
-
-router.post('/user-login', async (req, res) => {
-  try {
-    const { username, password } = req.body as { username: string; password: string }
-    if (!username || !password || !isEmail(username))
-      throw new Error('用户名或密码为空 | Username or password is empty')
-
-    const user = await getUser(username)
-    if (user == null || user.password !== md5(password))
-      throw new Error('用户不存在或密码错误 | User does not exist or incorrect password.')
-    if (user.status === Status.PreVerify)
-      throw new Error('请去邮箱中验证 | Please verify in the mailbox')
-    if (user != null && user.status === Status.AdminVerify)
-      throw new Error('请等待管理员开通 | Please wait for the admin to activate')
-    if (user.status !== Status.Normal)
-      throw new Error('账户状态异常 | Account status abnormal.')
-
-    const config = await getCacheConfig()
-    const token = jwt.sign({
-      name: user.name ? user.name : user.email,
-      avatar: user.avatar,
-      description: user.description,
-      userId: user._id,
-      root: username.toLowerCase() === process.env.ROOT_USER,
-    }, config.siteConfig.loginSalt.trim())
-    res.send({ status: 'Success', message: '登录成功 | Login successfully', data: { token } })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
-
-router.post('/user-send-reset-mail', async (req, res) => {
-  try {
-    const { username } = req.body as { username: string }
-    if (!username || !isEmail(username))
-      throw new Error('请输入格式正确的邮箱 | Please enter a correctly formatted email address.')
-
-    const user = await getUser(username)
-    if (user == null || user.status !== Status.Normal)
-      throw new Error('账户状态异常 | Account status abnormal.')
-    await sendResetPasswordMail(username, await getUserResetPasswordUrl(username))
-    res.send({ status: 'Success', message: '重置邮件已发送 | Reset email has been sent', data: null })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
-
-router.post('/user-reset-password', async (req, res) => {
-  try {
-    const { username, password, sign } = req.body as { username: string; password: string; sign: string }
-    if (!username || !password || !isEmail(username))
-      throw new Error('用户名或密码为空 | Username or password is empty')
-    if (!sign || !checkUserResetPassword(sign, username))
-      throw new Error('链接失效, 请重新发送 | The link is invalid, please resend.')
-    const user = await getUser(username)
-    if (user == null || user.status !== Status.Normal)
-      throw new Error('账户状态异常 | Account status abnormal.')
-
-    updateUserPassword(user._id.toString(), md5(password))
-
-    res.send({ status: 'Success', message: '密码重置成功 | Password reset successful', data: null })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
-
-router.post('/user-info', auth, async (req, res) => {
-  try {
-    const { name, avatar, description } = req.body as UserInfo
-    const userId = req.headers.userId.toString()
-
-    const user = await getUserById(userId)
-    if (user == null || user.status !== Status.Normal)
-      throw new Error('用户不存在 | User does not exist.')
-    await updateUserInfo(userId, { name, avatar, description } as UserInfo)
-    res.send({ status: 'Success', message: '更新成功 | Update successfully' })
+    const AUTH_SECRET_KEY = process.env.AUTH_SECRET_KEY
+    const hasAuth = isNotEmptyString(AUTH_SECRET_KEY)
+    res.send({ status: 'Success', message: '', data: { auth: hasAuth, model: currentModel() } })
   }
   catch (error) {
     res.send({ status: 'Fail', message: error.message, data: null })
@@ -565,156 +167,285 @@ router.post('/verify', async (req, res) => {
     const { token } = req.body as { token: string }
     if (!token)
       throw new Error('Secret key is empty')
-    const username = await checkUserVerify(token)
-    const user = await getUser(username)
-    if (user != null && user.status === Status.Normal) {
-      res.send({ status: 'Fail', message: '账号已存在 | The email exists', data: null })
-      return
-    }
-    const config = await getCacheConfig()
-    let message = '验证成功 | Verify successfully'
-    if (config.siteConfig.registerReview) {
-      await verifyUser(username, Status.AdminVerify)
-      await sendVerifyMailAdmin(process.env.ROOT_USER, username, await getUserVerifyUrlAdmin(username))
-      message = '验证成功, 请等待管理员开通 | Verify successfully, Please wait for the admin to activate'
-    }
-    else {
-      await verifyUser(username, Status.Normal)
-    }
-    res.send({ status: 'Success', message, data: null })
+
+    if (process.env.AUTH_SECRET_KEY !== token)
+      throw new Error('密钥无效 | Secret key is invalid')
+
+    res.send({ status: 'Success', message: 'Verify successfully', data: null })
+  }
+  catch (error) {
+    res.send({ status: 'Fail', message: error.message, data: null })
+  }
+})
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body
+
+    // 查询数据库中是否存在与之匹配的用户记录
+    const [rows] = await pool.execute(
+      'SELECT id, email,usage_count,usage_limit,apikey FROM users WHERE email = ? AND password = ?',
+      [email, password],
+    )
+    const user = rows[0]
+
+    if (!user)
+      throw new Error('用户名不存在或密码错误')
+
+    // 将用户 ID 存储到会话中
+    const token = jwt.sign({ userId: user.id }, process.env.AUTH_SECRET_KEY)
+    const usage_limit = user.usage_limit
+    const key = user.apikey
+
+    res.send({ status: 'Success', message: '登录成功', token, email: user.email, usage_count: user.usage_count, usage_limit: usage_limit || process.env.USAGE_LIMIT, key })
   }
   catch (error) {
     res.send({ status: 'Fail', message: error.message, data: null })
   }
 })
 
-router.post('/verifyadmin', async (req, res) => {
+function generateVerifyCode() {
+  const code = Math.floor(Math.random() * 1000000).toString().padStart(6, '0')
+  return code
+}
+
+// 发送验证码邮件
+async function sendVerifyCodeEmail(email, verifyCode) {
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP || 'smtp.qq.com',
+    port: 465,
+    secure: true,
+    auth: {
+      user: process.env.EMAIL_USERNAME,
+      pass: process.env.EMAIL_PASSWORD,
+    },
+  })
+
+  const info = await transporter.sendMail({
+    from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_USERNAME}>`,
+    to: email,
+    subject: '验证码',
+    text: `您的验证码是 ${verifyCode}，请在 10 分钟内输入该验证码完成邮箱验证。`,
+    html: `<p>您的验证码是 <strong>${verifyCode}</strong>，请在 10 分钟内输入该验证码完成邮箱验证。</p>`,
+  })
+}
+
+router.post('/register', async (req, res) => {
   try {
-    const { token } = req.body as { token: string }
+    const { email, password, verifyCode } = req.body
+
+    // 验证验证码是否正确
+    const savedVerifyCode = await pool.execute(
+      'SELECT * FROM verify_codes WHERE email = ? AND verify_code = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)',
+      [email, verifyCode],
+    )
+
+    if ((savedVerifyCode[0] as RowDataPacket[]).length === 0)
+      throw new Error('验证码不正确或已过期')
+
+    // 先查询数据库中是否有相同的邮箱记录
+    const [rows] = await pool.execute(
+      'SELECT * FROM users WHERE email = ?',
+      [email],
+    )
+
+    if ((rows as RowDataPacket[]).length > 0)
+      throw new Error('该邮箱已被注册')
+
+    // 向数据库中插入一条新用户记录
+    const [result] = await pool.execute(
+      'INSERT INTO users (email, password) VALUES (?, ?)',
+      [email, password],
+    )
+
+    const userId = (result as OkPacket).insertId
+
+    // 为新注册的用户生成 JWT 令牌
+    const token = jwt.sign({ userId }, process.env.AUTH_SECRET_KEY)
+
+    // 删除验证码
+    await pool.execute(
+      'DELETE FROM verify_codes WHERE email = ?',
+      [email],
+    )
+
+    res.send({ status: 'Success', message: '注册成功', token, email, usage_count: '0', usage_limit: process.env.USAGE_LIMIT, key: '1' })
+  }
+  catch (error) {
+    res.send({ status: 'Fail', message: error.message, data: null })
+  }
+})
+
+router.post('/send-verify-code', async (req, res) => {
+  try {
+    const { email } = req.body
+    const [emailrows] = await pool.execute(
+      'SELECT * FROM users WHERE email = ?',
+      [email],
+    )
+
+    if ((emailrows as RowDataPacket[]).length > 0)
+      throw new Error('该邮箱已被注册')
+
+    // 生成验证码
+    const verifyCode = generateVerifyCode()
+
+    // 保存验证码到数据库中
+
+    await pool.execute(
+      'INSERT INTO verify_codes (email, verify_code, created_at) VALUES (?, ?, NOW())',
+      [email, verifyCode],
+    )
+
+    // 发送邮件
+    await sendVerifyCodeEmail(email, verifyCode)
+
+    res.send({ status: 'Success', message: '验证码已发送' })
+  }
+  catch (error) {
+    res.send({ status: 'Fail', message: error.message, data: null })
+  }
+})
+
+router.post('/redeem', async (req, res) => {
+  try {
+    // 从请求头中获取 JWT Token，并解码得到用户ID
+    const authHeader = req.headers.authorization
+    if (!authHeader)
+      throw new Error('Please authenticate.')
+
+    const token = authHeader.split(' ')[1]
+
     if (!token)
-      throw new Error('Secret key is empty')
-    const username = await checkUserVerifyAdmin(token)
-    const user = await getUser(username)
-    if (user != null && user.status === Status.Normal) {
-      res.send({ status: 'Fail', message: '账户已开通 | The email has been opened.', data: null })
-      return
-    }
-    await verifyUser(username, Status.Normal)
-    await sendNoticeMail(username)
-    res.send({ status: 'Success', message: '账户已激活 | Account has been activated.', data: null })
+      throw new Error('Invalid token')
+
+    const decoded = await jwt.verify(token, process.env.AUTH_SECRET_KEY)
+    const userId = decoded.userId
+
+    // 从请求体中获取优惠码
+    const { couponCode } = req.body
+
+    // 调用 redeemCoupon 函数来兑换优惠码
+    const result = await redeemCoupon(userId, couponCode)
+
+    // 返回成功响应
+    res.send({
+      status: 'Success',
+      message: '优惠券兑换成功',
+      remainingUsageCount: result.remainingUsageCount,
+      newUsageLimit: result.newUsageLimit,
+    })
   }
   catch (error) {
     res.send({ status: 'Fail', message: error.message, data: null })
   }
 })
+router.post('/userkey', async (req, res) => {
+  const { userkeye } = req.body
+  const authHeader = req.headers.authorization
+  if (!authHeader)
+    throw new Error('Please authenticate.')
 
-router.post('/setting-base', rootAuth, async (req, res) => {
+  const token = authHeader.split(' ')[1]
+
+  if (!token)
+    throw new Error('Invalid token')
+
+  const decoded = await jwt.verify(token, process.env.AUTH_SECRET_KEY)
+  const userId = decoded.userId
+
   try {
-    const { apiKey, apiModel, chatModel, apiBaseUrl, accessToken, timeoutMs, reverseProxy, socksProxy, socksAuth, httpsProxy } = req.body as Config
+    // 更新用户的 API Key
+    await pool.query('UPDATE users SET apikey = ? WHERE id = ?', [userkeye, userId])
 
-    if (apiModel === 'ChatGPTAPI' && !isNotEmptyString(apiKey))
-      throw new Error('Missing OPENAI_API_KEY environment variable.')
-    else if (apiModel === 'ChatGPTUnofficialProxyAPI' && !isNotEmptyString(accessToken))
-      throw new Error('Missing OPENAI_ACCESS_TOKEN environment variable.')
-
-    const thisConfig = await getOriginConfig()
-    thisConfig.apiKey = apiKey
-    thisConfig.apiModel = apiModel
-    thisConfig.chatModel = chatModel
-    thisConfig.apiBaseUrl = apiBaseUrl
-    thisConfig.accessToken = accessToken
-    thisConfig.reverseProxy = reverseProxy
-    thisConfig.timeoutMs = timeoutMs
-    thisConfig.socksProxy = socksProxy
-    thisConfig.socksAuth = socksAuth
-    thisConfig.httpsProxy = httpsProxy
-    await updateConfig(thisConfig)
-    clearConfigCache()
-    initApi()
-    const response = await chatConfig()
-    res.send({ status: 'Success', message: '操作成功 | Successfully', data: response.data })
+    // 返回更新结果
+    res.send({ status: 'Success', message: 'apikey保存成功', data: userkeye })
   }
   catch (error) {
+    // 返回错误信息
     res.send({ status: 'Fail', message: error.message, data: null })
   }
 })
+// router.post('/redeem', async (req, res) => {
+//   try {
+//     // 从请求头中获取 JWT Token，并解码得到用户ID
+//     const authHeader = req.headers.authorization
+//     if (!authHeader)
+//       throw new Error('Please authenticate.')
 
-router.post('/setting-site', rootAuth, async (req, res) => {
-  try {
-    const config = req.body as SiteConfig
+//     const token = authHeader.split(' ')[1]
+//     if (!token)
+//       throw new Error('Invalid token')
 
-    const thisConfig = await getOriginConfig()
-    thisConfig.siteConfig = config
-    const result = await updateConfig(thisConfig)
-    clearConfigCache()
-    res.send({ status: 'Success', message: '操作成功 | Successfully', data: result.siteConfig })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
+//     const decoded = await jwt.verify(token, process.env.AUTH_SECRET_KEY)
+//     const userId = decoded.userId
 
-router.post('/setting-mail', rootAuth, async (req, res) => {
-  try {
-    const config = req.body as MailConfig
+//     // 从请求体中获取优惠码
+//     const { couponCode } = req.body
 
-    const thisConfig = await getOriginConfig()
-    thisConfig.mailConfig = config
-    const result = await updateConfig(thisConfig)
-    clearConfigCache()
-    res.send({ status: 'Success', message: '操作成功 | Successfully', data: result.mailConfig })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
+//     // 调用 redeemCoupon 函数来兑换优惠码
+//     const result = await redeemCoupon(userId, couponCode)
 
-router.post('/mail-test', rootAuth, async (req, res) => {
-  try {
-    const config = req.body as MailConfig
-    const userId = req.headers.userId as string
-    const user = await getUserById(userId)
-    await sendTestMail(user.email, config)
-    res.send({ status: 'Success', message: '发送成功 | Successfully', data: null })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
+//     // 返回成功响应
+//     res.send({
+//       message: '优惠券兑换成功',
+//       remainingUsageCount: result.remainingUsageCount,
+//       newUsageLimit: result.newUsageLimit,
+//     })
+//   }
+//   catch (error) {
+//     res.send({ status: 'Fail', message: error.message, data: null })
+//   }
+// })
+async function redeemCoupon(userId, couponCode) {
+  // 从数据库中查询优惠码
+  const [rows] = await pool.execute(
+    'SELECT * FROM coupon_codes WHERE coupon_code = ? AND is_used = 0',
+    [couponCode],
+  )
+  const coupon = rows[0]
+  if (!coupon)
+    throw new Error('无效的优惠码')
 
-router.post('/setting-audit', rootAuth, async (req, res) => {
-  try {
-    const config = req.body as AuditConfig
+  // 获取用户信息
+  const [userRows] = await pool.execute(
+    'SELECT usage_count, usage_limit FROM users WHERE id = ?',
+    [userId],
+  )
+  const user = userRows[0]
+  if (!user)
+    throw new Error('未找到用户')
 
-    const thisConfig = await getOriginConfig()
-    thisConfig.auditConfig = config
-    const result = await updateConfig(thisConfig)
-    clearConfigCache()
-    if (config.enabled)
-      initAuditService(config)
-    res.send({ status: 'Success', message: '操作成功 | Successfully', data: result.auditConfig })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
+  // 计算当前使用次数和总使用次数
+  const currentUsageCount = user.usage_count || 0
+  const totalUsageCount = user.usage_limit || process.env.USAGE_LIMIT
 
-router.post('/audit-test', rootAuth, async (req, res) => {
-  try {
-    const { audit, text } = req.body as { audit: AuditConfig; text: string }
-    const config = await getCacheConfig()
-    if (audit.enabled)
-      initAuditService(audit)
-    const result = await containsSensitiveWords(audit, text)
-    if (audit.enabled)
-      initAuditService(config.auditConfig)
-    res.send({ status: 'Success', message: result ? '含敏感词 | Contains sensitive words' : '不含敏感词 | Does not contain sensitive words.', data: null })
-  }
-  catch (error) {
-    res.send({ status: 'Fail', message: error.message, data: null })
-  }
-})
+  const remainingUsageCount = totalUsageCount - currentUsageCount
 
+  // 根据优惠码的面值更新用户表中的 usage_limit 字段
+  const newUsageLimit = parseInt(coupon.coupon_value, 10) + (user.usage_limit || 0)
+  await pool.execute(
+    'UPDATE users SET usage_limit = ? WHERE id = ?',
+    [newUsageLimit, userId],
+  )
+
+  // 标记优惠码为已使用
+  await pool.execute(
+    'UPDATE coupon_codes SET is_used = 1 WHERE id = ?',
+    [coupon.id],
+  )
+
+  // 增加用户的使用次数
+  await pool.execute(
+    'UPDATE users SET usage_count = ? WHERE id = ?',
+    [currentUsageCount + 1, userId],
+  )
+
+  // 返回剩余使用次数和新的 usage_limit 值
+  return {
+    remainingUsageCount,
+    newUsageLimit,
+  }
+}
 app.use('', router)
 app.use('/api', router)
 app.set('trust proxy', 1)

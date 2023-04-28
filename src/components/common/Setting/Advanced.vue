@@ -23,6 +23,7 @@ function updateSettings(options: Partial<SettingsState>) {
 function handleReset() {
   settingStore.resetSetting()
   ms.success(t('common.success'))
+
   window.location.reload()
 }
 </script>

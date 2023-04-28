@@ -1,24 +1,25 @@
 <script setup lang='ts'>
 import type { CSSProperties } from 'vue'
-import { computed, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { NButton, NLayoutSider } from 'naive-ui'
 import List from './List.vue'
 import Footer from './Footer.vue'
-import { useAppStore, useAuthStore, useChatStore } from '@/store'
+import { useAppStore, useChatStore } from '@/store'
 import { useBasicLayout } from '@/hooks/useBasicLayout'
 import { PromptStore } from '@/components/common'
 
 const appStore = useAppStore()
-const authStore = useAuthStore()
 const chatStore = useChatStore()
 
 const { isMobile } = useBasicLayout()
 const show = ref(false)
+const Setting = defineAsyncComponent(() => import('@/components/common/Setting/index copy.vue'))
 
+const showw = ref(false)
 const collapsed = computed(() => appStore.siderCollapsed)
-
-async function handleAdd() {
-  await chatStore.addHistory({ title: 'New Chat', uuid: Date.now(), isEdit: false })
+const username = ref(localStorage.getItem('email')?.trim() ?? '123')
+function handleAdd() {
+  chatStore.addHistory({ title: 'New Chat', uuid: Date.now(), isEdit: false })
   if (isMobile.value)
     appStore.setSiderCollapsed(true)
 }
@@ -56,6 +57,10 @@ watch(
     flush: 'post',
   },
 )
+function clearData(): void {
+  localStorage.removeItem('chatStorage')
+  location.reload()
+}
 </script>
 
 <template>
@@ -73,7 +78,7 @@ watch(
     <div class="flex flex-col h-full" :style="mobileSafeArea">
       <main class="flex flex-col flex-1 min-h-0">
         <div class="p-4">
-          <NButton dashed block :disabled="!!authStore.session?.auth && !authStore.token" @click="handleAdd">
+          <NButton dashed block @click="handleAdd">
             {{ $t('chat.newChatButton') }}
           </NButton>
         </div>
@@ -84,6 +89,15 @@ watch(
           <NButton block @click="show = true">
             {{ $t('store.siderButton') }}
           </NButton>
+          <div class="my-2" />
+          <NButton block @click="clearData">
+            {{ $t('store.qingchujilu') }}
+          </NButton>
+        </div>
+        <div class="p-4">
+          <NButton block @click="showw = true">
+            购买卡密
+          </NButton>
         </div>
       </main>
       <Footer />
@@ -93,4 +107,5 @@ watch(
     <div v-show="!collapsed" class="fixed inset-0 z-40 bg-black/40" @click="handleUpdateCollapsed" />
   </template>
   <PromptStore v-model:visible="show" />
+  <Setting v-if="showw" v-model:visible="showw" />
 </template>

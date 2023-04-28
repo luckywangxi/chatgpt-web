@@ -17,6 +17,15 @@ export interface Response<T = any> {
   data: T
   message: string | null
   status: string
+  response: string
+  token: string
+  email: string
+  usage_limit: string
+  usage_count: string
+  verifyCode: string
+  username: string
+  newUsageLimit: string
+  key: string
 }
 
 function http<T = any>(
@@ -28,8 +37,10 @@ function http<T = any>(
     if (res.data.status === 'Success' || typeof res.data === 'string')
       return res.data
 
-    if (res.data.status === 'Unauthorized')
+    if (res.data.status === 'Unauthorized') {
       authStore.removeToken()
+      window.location.reload()
+    }
 
     return Promise.reject(res.data)
   }
@@ -76,6 +87,7 @@ export function post<T = any>(
     signal,
     beforeRequest,
     afterRequest,
+
   })
 }
 

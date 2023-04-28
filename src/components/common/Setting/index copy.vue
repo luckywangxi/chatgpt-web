@@ -23,7 +23,7 @@ const authStore = useAuthStore()
 
 const isChatGPTAPI = computed<boolean>(() => !!authStore.isChatGPTAPI)
 
-const active = ref('General')
+const active = ref('Config')
 
 const show = computed({
   get() {

@@ -5,14 +5,10 @@ import { ChatGPTAPI, ChatGPTUnofficialProxyAPI } from 'chatgpt'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import httpsProxyAgent from 'https-proxy-agent'
 import fetch from 'node-fetch'
-import type { AuditConfig } from 'src/storage/model'
-import type { TextAuditService } from '../utils/textAudit'
-import { textAuditServices } from '../utils/textAudit'
-import { getCacheConfig, getOriginConfig } from '../storage/config'
 import { sendResponse } from '../utils'
 import { isNotEmptyString } from '../utils/is'
-import type { ChatContext, ChatGPTUnofficialProxyAPIOptions, ModelConfig } from '../types'
-import type { RequestOptions } from './types'
+import type { ApiModel, ChatContext, ChatGPTUnofficialProxyAPIOptions, ModelConfig } from '../types'
+import type { RequestOptions, SetProxyOptions, UsageResponse } from './types'
 
 const { HttpsProxyAgent } = httpsProxyAgent
 
@@ -27,25 +23,34 @@ const ErrorCodeMessage: Record<string, string> = {
   500: '[OpenAI] 服务器繁忙，请稍后再试 | Internal Server Error',
 }
 
+const timeoutMs: number = !isNaN(+process.env.TIMEOUT_MS) ? +process.env.TIMEOUT_MS : 100 * 1000
+const disableDebug: boolean = process.env.OPENAI_API_DISABLE_DEBUG === 'true'
+
+let apiModel: ApiModel
+const model = isNotEmptyString(process.env.OPENAI_API_MODEL) ? process.env.OPENAI_API_MODEL : 'gpt-3.5-turbo'
+
+if (!isNotEmptyString(process.env.OPENAI_API_KEY) && !isNotEmptyString(process.env.OPENAI_ACCESS_TOKEN))
+  throw new Error('Missing OPENAI_API_KEY or OPENAI_ACCESS_TOKEN environment variable')
+
 let api: ChatGPTAPI | ChatGPTUnofficialProxyAPI
-let auditService: TextAuditService
+let apiKey = process.env.OPENAI_API_KEY
 
-export async function initApi() {
-  // More Info: https://github.com/transitive-bullshit/chatgpt-api
-
-  const config = await getCacheConfig()
-  if (!config.apiKey && !config.accessToken)
-    throw new Error('Missing OPENAI_API_KEY or OPENAI_ACCESS_TOKEN environment variable')
-
-  if (config.apiModel === 'ChatGPTAPI') {
-    const OPENAI_API_BASE_URL = config.apiBaseUrl
-    const model = config.chatModel
+// 可以使用一个函数，用于动态设置apiKey
+async function setApiKey(key: string) {
+  apiKey = key
+  await initializeApi(apiKey)
+}
+async function initializeApi(apiKey) {
+  if (isNotEmptyString(process.env.OPENAI_API_KEY)) {
+    const OPENAI_API_BASE_URL = process.env.OPENAI_API_BASE_URL
+    console.log(apiKey)
 
     const options: ChatGPTAPIOptions = {
-      apiKey: config.apiKey,
+      apiKey,
       completionParams: { model },
-      debug: !config.apiDisableDebug,
+      debug: !disableDebug,
     }
+
     // increase max token limit if use gpt-4
     if (model.toLowerCase().includes('gpt-4')) {
       // if use 32k model
@@ -62,42 +67,39 @@ export async function initApi() {
     if (isNotEmptyString(OPENAI_API_BASE_URL))
       options.apiBaseUrl = `${OPENAI_API_BASE_URL}/v1`
 
-    await setupProxy(options)
+    setupProxy(options)
 
     api = new ChatGPTAPI({ ...options })
+    apiModel = 'ChatGPTAPI'
   }
   else {
-    const model = config.chatModel
     const options: ChatGPTUnofficialProxyAPIOptions = {
-      accessToken: config.accessToken,
-      apiReverseProxyUrl: isNotEmptyString(config.reverseProxy) ? config.reverseProxy : 'https://ai.fakeopen.com/api/conversation',
+      accessToken: process.env.OPENAI_ACCESS_TOKEN,
+      apiReverseProxyUrl: isNotEmptyString(process.env.API_REVERSE_PROXY) ? process.env.API_REVERSE_PROXY : 'https://bypass.churchless.tech/api/conversation',
       model,
-      debug: !config.apiDisableDebug,
+      debug: !disableDebug,
     }
 
-    await setupProxy(options)
+    setupProxy(options)
 
     api = new ChatGPTUnofficialProxyAPI({ ...options })
+    apiModel = 'ChatGPTUnofficialProxyAPI'
   }
 }
 
 async function chatReplyProcess(options: RequestOptions) {
-  const config = await getCacheConfig()
-  const model = config.chatModel
   const { message, lastContext, process, systemMessage, temperature, top_p } = options
-
   try {
-    const timeoutMs = (await getCacheConfig()).timeoutMs
     let options: SendMessageOptions = { timeoutMs }
 
-    if (config.apiModel === 'ChatGPTAPI') {
+    if (apiModel === 'ChatGPTAPI') {
       if (isNotEmptyString(systemMessage))
         options.systemMessage = systemMessage
       options.completionParams = { model, temperature, top_p }
     }
 
     if (lastContext != null) {
-      if (config.apiModel === 'ChatGPTAPI')
+      if (apiModel === 'ChatGPTAPI')
         options.parentMessageId = lastContext.parentMessageId
       else
         options = { ...lastContext }
@@ -121,42 +123,10 @@ async function chatReplyProcess(options: RequestOptions) {
   }
 }
 
-export function initAuditService(audit: AuditConfig) {
-  if (!audit || !audit.options || !audit.options.apiKey || !audit.options.apiSecret)
-    return
-  const Service = textAuditServices[audit.provider]
-  auditService = new Service(audit.options)
-}
+async function fetchUsage(key: string | undefined = undefined) {
+  const OPENAI_API_KEY = (key === '1' || key === undefined) ? process.env.OPENAI_API_KEY : key
 
-async function containsSensitiveWords(audit: AuditConfig, text: string): Promise<boolean> {
-  if (audit.customizeEnabled && isNotEmptyString(audit.sensitiveWords)) {
-    const textLower = text.toLowerCase()
-    const notSafe = audit.sensitiveWords.split('\n').filter(d => textLower.includes(d.trim().toLowerCase())).length > 0
-    if (notSafe)
-      return true
-  }
-  if (audit.enabled) {
-    if (!auditService)
-      initAuditService(audit)
-    return await auditService.containsSensitiveWords(text)
-  }
-  return false
-}
-let cachedBanlance: number | undefined
-let cacheExpiration = 0
-
-async function fetchBalance() {
-  const now = new Date().getTime()
-  if (cachedBanlance && cacheExpiration > now)
-    return Promise.resolve(cachedBanlance.toFixed(3))
-
-  // 计算起始日期和结束日期
-  const startDate = new Date(now - 90 * 24 * 60 * 60 * 1000)
-  const endDate = new Date(now + 24 * 60 * 60 * 1000)
-
-  const config = await getCacheConfig()
-  const OPENAI_API_KEY = config.apiKey
-  const OPENAI_API_BASE_URL = config.apiBaseUrl
+  const OPENAI_API_BASE_URL = process.env.OPENAI_API_BASE_URL
 
   if (!isNotEmptyString(OPENAI_API_KEY))
     return Promise.resolve('-')
@@ -165,104 +135,90 @@ async function fetchBalance() {
     ? OPENAI_API_BASE_URL
     : 'https://api.openai.com'
 
-  // 查是否订阅
-  const urlSubscription = `${API_BASE_URL}/v1/dashboard/billing/subscription`
-  // 查普通账单
-  // const urlBalance = `${API_BASE_URL}/dashboard/billing/credit_grants`
-  // 查使用量
-  const urlUsage = `${API_BASE_URL}/v1/dashboard/billing/usage?start_date=${formatDate(startDate)}&end_date=${formatDate(endDate)}`
+  const [startDate, endDate] = formatDate()
 
+  // 每月使用量
+  const urlUsage = `${API_BASE_URL}/v1/dashboard/billing/usage?start_date=${startDate}&end_date=${endDate}`
+  console.log(OPENAI_API_KEY)
   const headers = {
     'Authorization': `Bearer ${OPENAI_API_KEY}`,
     'Content-Type': 'application/json',
   }
-  let socksAgent
-  let httpsAgent
-  if (isNotEmptyString(config.socksProxy)) {
-    socksAgent = new SocksProxyAgent({
-      hostname: config.socksProxy.split(':')[0],
-      port: parseInt(config.socksProxy.split(':')[1]),
-      userId: isNotEmptyString(config.socksAuth) ? config.socksAuth.split(':')[0] : undefined,
-      password: isNotEmptyString(config.socksAuth) ? config.socksAuth.split(':')[1] : undefined,
-    })
-  }
-  else if (isNotEmptyString(config.httpsProxy)) {
-    httpsAgent = new HttpsProxyAgent(config.httpsProxy)
-  }
+
+  const options = {} as SetProxyOptions
+
+  setupProxy(options)
 
   try {
-    // 获取API限额
-    let response = await fetch(urlSubscription, { agent: socksAgent === undefined ? httpsAgent : socksAgent, headers })
-    if (!response.ok) {
-      console.error('您的账户已被封禁，请登录OpenAI进行查看。')
-      return
-    }
-    const subscriptionData = await response.json()
-    const totalAmount = subscriptionData.hard_limit_usd
-
     // 获取已使用量
-    response = await fetch(urlUsage, { agent: socksAgent === undefined ? httpsAgent : socksAgent, headers })
-    const usageData = await response.json()
-    const totalUsage = usageData.total_usage / 100
-
-    // 计算剩余额度
-    cachedBanlance = totalAmount - totalUsage
-    cacheExpiration = now + 60 * 60 * 1000
-
-    return Promise.resolve(cachedBanlance.toFixed(3))
+    const useResponse = await options.fetch(urlUsage, { headers })
+    if (!useResponse.ok)
+      throw new Error('获取使用量失败')
+    const usageData = await useResponse.json() as UsageResponse
+    const usage = Math.round(usageData.total_usage) / 100
+    return Promise.resolve(usage ? `$${usage}` : '-')
   }
   catch (error) {
-    global.console.error(error)
+    global.console.log(error)
     return Promise.resolve('-')
   }
 }
 
-function formatDate(date) {
-  const year = date.getFullYear()
-  const month = (date.getMonth() + 1).toString().padStart(2, '0')
-  const day = date.getDate().toString().padStart(2, '0')
-
-  return `${year}-${month}-${day}`
+function formatDate(): string[] {
+  const today = new Date()
+  const year = today.getFullYear()
+  const month = today.getMonth() + 1
+  const lastDay = new Date(year, month, 0)
+  const formattedFirstDay = `${year}-${month.toString().padStart(2, '0')}-01`
+  const formattedLastDay = `${year}-${month.toString().padStart(2, '0')}-${lastDay.getDate().toString().padStart(2, '0')}`
+  return [formattedFirstDay, formattedLastDay]
 }
 
-async function chatConfig() {
-  const config = await getOriginConfig() as ModelConfig
-  config.balance = await fetchBalance()
+async function chatConfig(key) {
+  const usage = await fetchUsage(key)
+  const reverseProxy = process.env.API_REVERSE_PROXY ?? '-'
+  const httpsProxy = (process.env.HTTPS_PROXY || process.env.ALL_PROXY) ?? '-'
+  const socksProxy = (process.env.SOCKS_PROXY_HOST && process.env.SOCKS_PROXY_PORT)
+    ? (`${process.env.SOCKS_PROXY_HOST}:${process.env.SOCKS_PROXY_PORT}`)
+    : '-'
   return sendResponse<ModelConfig>({
     type: 'Success',
-    data: config,
+    data: { apiModel, reverseProxy, timeoutMs, socksProxy, httpsProxy, usage },
   })
 }
 
-async function setupProxy(options: ChatGPTAPIOptions | ChatGPTUnofficialProxyAPIOptions) {
-  const config = await getCacheConfig()
-  if (isNotEmptyString(config.socksProxy)) {
+function setupProxy(options: SetProxyOptions) {
+  if (isNotEmptyString(process.env.SOCKS_PROXY_HOST) && isNotEmptyString(process.env.SOCKS_PROXY_PORT)) {
     const agent = new SocksProxyAgent({
-      hostname: config.socksProxy.split(':')[0],
-      port: parseInt(config.socksProxy.split(':')[1]),
-      userId: isNotEmptyString(config.socksAuth) ? config.socksAuth.split(':')[0] : undefined,
-      password: isNotEmptyString(config.socksAuth) ? config.socksAuth.split(':')[1] : undefined,
-
+      hostname: process.env.SOCKS_PROXY_HOST,
+      port: process.env.SOCKS_PROXY_PORT,
+      userId: isNotEmptyString(process.env.SOCKS_PROXY_USERNAME) ? process.env.SOCKS_PROXY_USERNAME : undefined,
+      password: isNotEmptyString(process.env.SOCKS_PROXY_PASSWORD) ? process.env.SOCKS_PROXY_PASSWORD : undefined,
     })
     options.fetch = (url, options) => {
       return fetch(url, { agent, ...options })
     }
   }
-  else {
-    if (isNotEmptyString(config.httpsProxy)) {
-      const httpsProxy = config.httpsProxy
-      if (httpsProxy) {
-        const agent = new HttpsProxyAgent(httpsProxy)
-        options.fetch = (url, options) => {
-          return fetch(url, { agent, ...options })
-        }
+  else if (isNotEmptyString(process.env.HTTPS_PROXY) || isNotEmptyString(process.env.ALL_PROXY)) {
+    const httpsProxy = process.env.HTTPS_PROXY || process.env.ALL_PROXY
+    if (httpsProxy) {
+      const agent = new HttpsProxyAgent(httpsProxy)
+      options.fetch = (url, options) => {
+        return fetch(url, { agent, ...options })
       }
+    }
+  }
+  else {
+    options.fetch = (url, options) => {
+      return fetch(url, { ...options })
     }
   }
 }
 
-initApi()
+function currentModel(): ApiModel {
+  return apiModel
+}
 
 export type { ChatContext, ChatMessage }
 
-export { chatReplyProcess, chatConfig, containsSensitiveWords }
+export { chatReplyProcess, chatConfig, currentModel, setApiKey }

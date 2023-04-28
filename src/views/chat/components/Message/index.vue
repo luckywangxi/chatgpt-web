@@ -1,13 +1,13 @@
 <script setup lang='ts'>
 import { computed, ref } from 'vue'
-import { NDropdown, NPopover, useMessage } from 'naive-ui'
+import { NDropdown } from 'naive-ui'
 import AvatarComponent from './Avatar.vue'
 import TextComponent from './Text.vue'
 import { SvgIcon } from '@/components/common'
+import { copyText } from '@/utils/format'
 import { useIconRender } from '@/hooks/useIconRender'
 import { t } from '@/locales'
 import { useBasicLayout } from '@/hooks/useBasicLayout'
-import { copyToClip } from '@/utils/copy'
 
 interface Props {
   dateTime?: string
@@ -15,12 +15,6 @@ interface Props {
   inversion?: boolean
   error?: boolean
   loading?: boolean
-  usage?: {
-    completion_tokens: number
-    prompt_tokens: number
-    total_tokens: number
-    estimated: boolean
-  }
 }
 
 interface Emit {
@@ -36,15 +30,11 @@ const { isMobile } = useBasicLayout()
 
 const { iconRender } = useIconRender()
 
-const message = useMessage()
-
 const textRef = ref<HTMLElement>()
 
 const asRawText = ref(props.inversion)
 
 const messageRef = ref<HTMLElement>()
-
-const url_openai_token = 'https://help.openai.com/en/articles/4936856-what-are-tokens-and-how-to-count-them'
 
 const options = computed(() => {
   const common = [
@@ -74,7 +64,7 @@ const options = computed(() => {
 function handleSelect(key: 'copyText' | 'delete' | 'toggleRenderType') {
   switch (key) {
     case 'copyText':
-      handleCopy()
+      copyText({ text: props.text ?? '' })
       return
     case 'toggleRenderType':
       asRawText.value = !asRawText.value
@@ -87,16 +77,6 @@ function handleSelect(key: 'copyText' | 'delete' | 'toggleRenderType') {
 function handleRegenerate() {
   messageRef.value?.scrollIntoView()
   emit('regenerate')
-}
-
-async function handleCopy() {
-  try {
-    await copyToClip(props.text || '')
-    message.success('复制成功')
-  }
-  catch {
-    message.error('复制失败')
-  }
 }
 </script>
 
@@ -114,26 +94,7 @@ async function handleCopy() {
     </div>
     <div class="overflow-hidden text-sm " :class="[inversion ? 'items-end' : 'items-start']">
       <p class="text-xs text-[#b4bbc4]" :class="[inversion ? 'text-right' : 'text-left']">
-        {{ new Date(dateTime as string).toLocaleString() }}
-        <template v-if="usage">
-          <NPopover trigger="hover">
-            <template #trigger>
-              <span>
-                <span>[</span>
-                <span>{{ usage.estimated ? '~' : '' }}</span>
-                <span>{{ usage.prompt_tokens }}+{{ usage.completion_tokens }}={{ usage.total_tokens }}</span>
-                <span>]</span>
-              </span>
-            </template>
-            <span class="text-xs">
-              {{ usage.estimated ? t('chat.usageEstimate') : '' }}
-              {{ t('chat.usagePrompt') }} {{ usage.prompt_tokens }}
-              + {{ t('chat.usageResponse') }} {{ usage.completion_tokens }}
-              = {{ t('chat.usageTotal') }}<a :href="url_openai_token" target="_blank">(?)</a>
-              {{ usage.total_tokens }}
-            </span>
-          </NPopover>
-        </template>
+        {{ dateTime }}
       </p>
       <div
         class="flex items-end gap-1 mt-2"
